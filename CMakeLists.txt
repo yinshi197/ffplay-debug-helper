@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.5.0)
+
+project(ffplay VERSION 0.1.0 LANGUAGES C CXX)   #启用C和C++的编译器。包含.c文件时需要启用C编译器
+
+set(CMAKE_CXX_STANDARD 17)
+
+set(HOME ${CMAKE_SOURCE_DIR})
+set(EXECUTABLE_OUTPUT_PATH ${HOME}/bin)
+set(FFMPEG_PATH D://FFmpeg//ffmpeg-7.0-fdk_aac)
+set(SDL_PATH D://FFmpeg//SDL-release-2.30.6//build64)
+
+#包含头文件
+include_directories(${HOME}/include)
+include_directories(${FFMPEG_PATH}/include)
+include_directories(${SDL_PATH}/include)
+
+# 指定要链接的动态库的路径
+link_directories(${FFMPEG_PATH}/bin)
+link_directories(${SDL_PATH}/bin)
+
+# GLOB_RECURSE：递归搜索指定目录
+file(GLOB MAIN_SRC ${HOME}/src/*.cpp ${HOME}/src/*.c)
+file(GLOB MAIN_HEAD ${HOME}/include/*.h)
+
+message("Source files: ${MAIN_SRC}")  # 打印所有源文件路径
+message("Header files: ${MAIN_HEAD}")  # 打印所有源文件路径
+
+message("C compiler: ${CMAKE_C_COMPILER}")
+message("C++ compiler: ${CMAKE_CXX_COMPILER}")
+
+
+add_executable(ffplay ${MAIN_SRC})
+
+# 指定要链接的动态库
+target_link_libraries(ffplay SDL2 avcodec-61 avdevice-61 avfilter-10 avformat-61 avutil-59 postproc-58 swresample-5 swscale-8)
+
