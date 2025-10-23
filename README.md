@@ -1,65 +1,54 @@
-# ffplay Debug Helper
+# ffplay-debug-helper
 
-一个用于实验和调试 FFmpeg `ffplay` 播放器的精简示例工程。项目在官方 `ffplay.c` 的基础上进行了裁剪与注释，方便在本地环境中编译、调试，并观察 FFmpeg/SDL 日志输出。
-
-## 项目亮点
-
-- 🌱 结构简单：只包含 `ffplay` 运行所需的最小代码与头文件，便于阅读与修改。
-- 🧪 调试友好：在 `main.cpp` 中预置了 FFmpeg 与 SDL 的日志输出示例，方便快速验证开发环境。
-- 🔧 可扩展：通过 `include/` 与 `src/` 目录划分头文件和实现文件，支持继续对 `ffplay` 进行定制。
+## 项目简介
+`ffplay-debug-helper` 基于 FFmpeg 官方播放器 `ffplay` 的源码进行了结构化拆分与注释补充，方便在本地 IDE 中调试音视频播放流程。仓库将核心数据结构定义在 `include/datactl.h`，播放主循环和渲染管线拆分在 `src/` 目录下，帮助开发者快速理解并修改 ffplay 的多线程队列、时钟同步、Vulkan/SDL 渲染等模块。
 
 ## 目录结构
-
 ```
 .
-├── CMakeLists.txt        # CMake 构建脚本（需配置 FFmpeg/SDL 路径）
-├── include/              # 头文件，包含 ffplay 所需的数据结构与声明
-├── src/                  # 源码，含 main 入口与 ffplay 主要实现
-└── ffmpeg-7.0-fdk_aac.zip # 参考用的 FFmpeg 预编译包（Windows 路径示例）
+├── CMakeLists.txt        # CMake 构建脚本，集中维护 FFmpeg/SDL 路径
+├── include/              # 头文件，包含数据结构(datactl.h)与渲染接口(ffplay_renderer.h)
+├── src/
+│   ├── main.cpp          # 程序入口，初始化日志/SDL 并调用 ffplay 主流程
+│   ├── ffplay.cpp        # 主要的解码、时钟、线程调度逻辑
+│   └── ffplay_renderer.c # Vulkan/SDL 渲染实现（源自 FFmpeg 项目）
+├── ffmpeg-7.0-fdk_aac.zip# 预打包的 FFmpeg 依赖，可作为路径示例
+└── README.md
 ```
 
-## 环境依赖
+## 依赖环境
+- CMake ≥ 3.5
+- C/C++17 编译器（GCC、Clang 或 MSVC）
+- SDL2 开发库
+- FFmpeg 7.x（需包含 `avcodec`、`avformat`、`avfilter`、`avdevice` 等组件）
 
-- C/C++ 编译器（推荐 MSVC 或 clang/clang-cl，需支持 C++17）
-- [CMake](https://cmake.org/) ≥ 3.5
-- [FFmpeg 7.0](https://ffmpeg.org/)（需要包含 `avcodec`、`avformat`、`avfilter`、`swresample`、`swscale` 等动态库）
-- [SDL2 2.30](https://github.com/libsdl-org/SDL)（动态库与头文件）
-
-> **提示**：仓库中附带的 `ffmpeg-7.0-fdk_aac.zip` 仅作为路径示例。实际编译时请在本地解压或替换为你自己的 FFmpeg/SDL 安装目录。
+> Windows 平台建议直接解压仓库附带的 `ffmpeg-7.0-fdk_aac.zip`，或使用你本地已有的预编译 FFmpeg + SDL2 包。Linux/macOS 用户请通过包管理器或源码方式安装对等版本，并调整路径。
 
 ## 构建步骤
+1. **准备依赖路径**  
+   编辑 `CMakeLists.txt` 中的 `FFMPEG_PATH`、`SDL_PATH` 变量，指向本地 FFmpeg 与 SDL2 的根目录。仓库给出的默认值示例位于 `D://FFmpeg/...`，请根据实际环境修改。
 
-1. 安装好 FFmpeg 与 SDL2，并记录其包含头文件与库文件的路径。
-2. 编辑根目录下的 `CMakeLists.txt`，将以下变量改为本地实际路径：
-   ```cmake
-   set(FFMPEG_PATH D://FFmpeg//ffmpeg-7.0-fdk_aac)
-   set(SDL_PATH    D://FFmpeg//SDL-release-2.30.6//build64)
-   ```
-3. 生成与构建：
+2. **生成构建目录**  
    ```bash
    cmake -B build -S .
-   cmake --build build --config Release
    ```
-4. 编译成功后，目标可执行文件将位于 `bin/ffplay`（或对应平台的后缀）。
 
-## 运行与调试
+3. **编译可执行文件**  
+   ```bash
+   cmake --build build
+   ```
+   成功后可执行文件默认输出到 `${PROJECT_ROOT}/bin/ffplay`。
 
-- 运行可执行文件前，请确保 FFmpeg 与 SDL 的动态库能够被系统找到（Windows 下可将 DLL 放在可执行文件同目录，或添加到 `PATH`）。
-- 通过命令行执行：
-  ```bash
-  ./bin/ffplay <media-file>
-  ```
-- 程序会输出 FFmpeg 与 SDL 的调试信息，便于确认播放器初始化流程。
+4. **运行与调试**  
+   在 IDE 或命令行下运行 `bin/ffplay <媒体文件>`。源码在关键模块增加了注释与日志等级设置（`av_log_set_level(AV_LOG_DEBUG)`、`SDL_Log`），方便单步调试与观察线程/队列状态。
 
 ## 常见问题
+- **链接失败/找不到库**：确认 `FFMPEG_PATH/bin` 与 `SDL_PATH/bin` 下的动态库已在 `PATH`（Windows）或 `LD_LIBRARY_PATH`（Linux） 中，或手动复制到执行目录。
+- **SDL 初始化失败**：请确保系统已安装对应平台的图形与音频驱动，并在无显示环境下配置虚拟显示（如 Linux 下的 `xvfb`）。
+- **Vulkan 渲染可选**：`ffplay_renderer.c` 包含 Vulkan + libplacebo 的实现，若本地未启用相应扩展，可在 FFmpeg 编译时关闭 `--enable-vulkan`，或在运行时忽略相关路径。
 
-- **链接失败 / 找不到库**：检查 `FFMPEG_PATH` 与 `SDL_PATH` 是否指向正确的 `include`、`bin` 目录；或在 CMake 中追加 `link_directories`。
-- **运行时提示缺少 DLL**：将 FFmpeg 与 SDL 的动态库放在可执行文件所在目录，或加入系统环境变量。
-- **想在 macOS/Linux 编译？**：修改 `CMakeLists.txt` 中的库名称/后缀，并确保系统安装了对应版本的 FFmpeg 与 SDL2。
+## 参考资料
+- [FFmpeg 官方文档](https://ffmpeg.org/documentation.html)
+- [SDL2 Wiki](https://wiki.libsdl.org/FrontPage)
 
-## 下一步计划
-
-- 将 Windows 风格的硬编码路径抽离为 CMake 选项，便于跨平台使用。
-- 为 `ffplay` 核心模块补充单元测试与更多注释。
-
-欢迎提交 issue 或 PR 来完善这个调试项目！
+欢迎根据自身需求扩展调试工具、日志输出或图形界面，本仓库提供的结构化代码可作为深入学习 ffplay 的起点。

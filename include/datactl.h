@@ -407,17 +407,17 @@ typedef struct VideoState {
 //====================== 用户输入参数 ======================
 /* 输入源配置 */
 static const AVInputFormat *file_iformat; // 强制输入格式（如rtsp/udp）
-static const char *input_filename;        // 输入文件/URL路径
-static const char *window_title;          // 窗口标题（默认显示文件名）
+static char *input_filename;              // 输入文件/URL路径
+static char *window_title;                // 窗口标题（默认显示文件名）
 
 /* 解码控制 */
-static const char *video_codec_name;      // 指定视频解码器（如h264_cuvid）
-static const char *audio_codec_name;      // 指定音频解码器（如aac_at）
-static const char *subtitle_codec_name;   // 指定字幕解码器
-static const char *wanted_stream_spec[AVMEDIA_TYPE_NB] = {0}; // 流选择过滤器（语法："v:0,a:2"）
+static char *video_codec_name;            // 指定视频解码器（如h264_cuvid）
+static char *audio_codec_name;            // 指定音频解码器（如aac_at）
+static char *subtitle_codec_name;         // 指定字幕解码器
+static char *wanted_stream_spec[AVMEDIA_TYPE_NB] = {0}; // 流选择过滤器（语法："v:0,a:2"）
 
 /* 硬件加速 */
-static const char *hwaccel;               // 硬件解码器类型（如"cuda"/"dxva2"）
+static char *hwaccel;                     // 硬件解码器类型（如"cuda"/"dxva2"）
 static int enable_vulkan;                 // 启用Vulkan渲染器（实验性）
 static char *vulkan_params;               // Vulkan渲染参数（JSON格式）
 
@@ -471,7 +471,7 @@ static int cursor_hidden = 0;             // 光标隐藏状态（1=隐藏）
 static int64_t cursor_last_shown;         // 最后光标活动时间（用于自动隐藏）
 
 //====================== 滤镜系统 ======================
-static const char **vfilters_list = NULL; // 视频滤镜链（如"scale=1280:720"）
+static char **vfilters_list = NULL;       // 视频滤镜链（如"scale=1280:720"）
 static int nb_vfilters = 0;               // 视频滤镜数量
 static char *afilters = NULL;             // 音频滤镜描述（如"aresample=48000"）
 
