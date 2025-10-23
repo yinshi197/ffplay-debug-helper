@@ -1,4 +1,7 @@
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <string>
 #include "datactl.h"
 
 //补充
@@ -12,6 +15,162 @@ std::string av_error_string(int errnum) {
     char buf[AV_ERROR_MAX_STRING_SIZE]{};
     av_strerror(errnum, buf, sizeof(buf));
     return std::string(buf);
+}
+
+static void option_fail(const char *opt, const char *msg, const char *value = nullptr)
+{
+    if (value)
+        av_log(NULL, AV_LOG_FATAL, "%s for option %s (value: %s)\n", msg, opt, value);
+    else
+        av_log(NULL, AV_LOG_FATAL, "%s for option %s\n", msg, opt);
+    exit(1);
+}
+
+static void assign_string_option(char **dest, const char *value, const char *opt_name)
+{
+    if (!dest)
+        return;
+    av_freep(dest);
+    if (!value)
+        return;
+    char *dup = av_strdup(value);
+    if (!dup)
+        option_fail(opt_name, "Unable to allocate string", value);
+    *dest = dup;
+}
+
+static void reset_video_filters()
+{
+    if (vfilters_list) {
+        for (int i = 0; i < nb_vfilters; ++i)
+            av_freep(&vfilters_list[i]);
+        av_freep(&vfilters_list);
+    }
+    nb_vfilters = 0;
+}
+
+static void set_video_filters(const char *filters)
+{
+    reset_video_filters();
+    if (!filters)
+        return;
+    vfilters_list = static_cast<char **>(av_mallocz_array(1, sizeof(*vfilters_list)));
+    if (!vfilters_list)
+        option_fail("-vf", "Unable to allocate video filter array");
+    vfilters_list[0] = av_strdup(filters);
+    if (!vfilters_list[0])
+        option_fail("-vf", "Unable to allocate video filter string", filters);
+    nb_vfilters = 1;
+}
+
+static void set_stream_specifier(AVMediaType type, const char *spec, const char *opt)
+{
+    if (type < 0 || type >= AVMEDIA_TYPE_NB)
+        option_fail(opt, "Unsupported stream specifier type");
+    av_freep(&wanted_stream_spec[type]);
+    if (!spec)
+        return;
+    wanted_stream_spec[type] = av_strdup(spec);
+    if (!wanted_stream_spec[type])
+        option_fail(opt, "Unable to allocate stream specifier", spec);
+}
+
+static int parse_int_option(const char *opt, const char *value)
+{
+    if (!value)
+        option_fail(opt, "Missing value");
+    char *end = nullptr;
+    long val = strtol(value, &end, 10);
+    if (!value[0] || (end && *end))
+        option_fail(opt, "Invalid integer value", value);
+    return static_cast<int>(val);
+}
+
+static double parse_double_option(const char *opt, const char *value)
+{
+    if (!value)
+        option_fail(opt, "Missing value");
+    char *end = nullptr;
+    double val = strtod(value, &end);
+    if (!value[0] || (end && *end))
+        option_fail(opt, "Invalid numeric value", value);
+    return val;
+}
+
+static int64_t parse_time_option(const char *opt, const char *value)
+{
+    if (!value)
+        option_fail(opt, "Missing value");
+    int64_t us = 0;
+    int ret = av_parse_time(&us, value, 1);
+    if (ret < 0)
+        option_fail(opt, "Invalid time specification", value);
+    return us;
+}
+
+static void parse_window_size(const char *opt, const char *value)
+{
+    if (!value)
+        option_fail(opt, "Missing value");
+    int w = 0, h = 0;
+    if (av_parse_video_size(&w, &h, value) < 0)
+        option_fail(opt, "Invalid size specification", value);
+    screen_width = w;
+    screen_height = h;
+}
+
+static VideoState::ShowMode parse_showmode(const char *value)
+{
+    if (!value)
+        option_fail("-showmode", "Missing value");
+    if (!av_strcasecmp(value, "video"))
+        return VideoState::ShowMode::SHOW_MODE_VIDEO;
+    if (!av_strcasecmp(value, "waves"))
+        return VideoState::ShowMode::SHOW_MODE_WAVES;
+    if (!av_strcasecmp(value, "rdft"))
+        return VideoState::ShowMode::SHOW_MODE_RDFT;
+    option_fail("-showmode", "Unsupported show mode", value);
+    return VideoState::ShowMode::SHOW_MODE_VIDEO;
+}
+
+static int parse_sync_type(const char *value)
+{
+    if (!value)
+        option_fail("-sync", "Missing value");
+    if (!av_strcasecmp(value, "audio"))
+        return AV_SYNC_AUDIO_MASTER;
+    if (!av_strcasecmp(value, "video"))
+        return AV_SYNC_VIDEO_MASTER;
+    if (!av_strcasecmp(value, "ext"))
+        return AV_SYNC_EXTERNAL_CLOCK;
+    option_fail("-sync", "Unsupported master clock", value);
+    return AV_SYNC_AUDIO_MASTER;
+}
+
+static int parse_log_level_option(const char *value)
+{
+    if (!value)
+        option_fail("-loglevel", "Missing value");
+    static const struct { const char *name; int level; } levels[] = {
+        { "quiet",   AV_LOG_QUIET },
+        { "panic",   AV_LOG_PANIC },
+        { "fatal",   AV_LOG_FATAL },
+        { "error",   AV_LOG_ERROR },
+        { "warning", AV_LOG_WARNING },
+        { "info",    AV_LOG_INFO },
+        { "verbose", AV_LOG_VERBOSE },
+        { "debug",   AV_LOG_DEBUG },
+        { "trace",   AV_LOG_TRACE },
+    };
+    for (const auto &entry : levels) {
+        if (!av_strcasecmp(value, entry.name))
+            return entry.level;
+    }
+    char *end = nullptr;
+    long val = strtol(value, &end, 10);
+    if (!value[0] || (end && *end))
+        option_fail("-loglevel", "Invalid log level", value);
+    return static_cast<int>(val);
 }
 
 static void set_clock_at(Clock *c, double pts, int serial, double time)
@@ -160,14 +319,17 @@ static void do_exit(VideoState *is)
     if (window)
         SDL_DestroyWindow(window);
     uninit_opts();
-    for (int i = 0; i < nb_vfilters; i++)
-        av_freep(&vfilters_list[i]);
-    av_freep(&vfilters_list);
+    reset_video_filters();
     av_freep(&video_codec_name);
     av_freep(&audio_codec_name);
     av_freep(&subtitle_codec_name);
-    if(input_filename)
-        input_filename = nullptr;
+    av_freep(&hwaccel);
+    av_freep(&vulkan_params);
+    av_freep(&afilters);
+    for (int i = 0; i < AVMEDIA_TYPE_NB; ++i)
+        av_freep(&wanted_stream_spec[i]);
+    av_freep(&window_title);
+    av_freep(&input_filename);
     avformat_network_deinit();
     if (show_status)
         printf("\n");
@@ -1544,7 +1706,7 @@ int read_thread(void *arg)
 
     //设置窗口标题, 使用无边框窗口则不需要
     if (!window_title)
-        window_title = input_filename;
+        assign_string_option(&window_title, input_filename, "window_title");
 
     /* if seeking requested, we execute it */
     if (start_time != AV_NOPTS_VALUE) {
@@ -1872,7 +2034,7 @@ static int video_open(VideoState *is)
     h = screen_height ? screen_height : default_height;
 
     if (!window_title)
-        window_title = input_filename;
+        assign_string_option(&window_title, input_filename, "window_title");
     SDL_SetWindowTitle(window, window_title);
 
     SDL_SetWindowSize(window, w, h);
@@ -2823,9 +2985,25 @@ static void event_loop(VideoState *cur_stream)
 
 static void show_usage(void)
 {
-    av_log(NULL, AV_LOG_INFO, "Simple media player\n");
-    av_log(NULL, AV_LOG_INFO, "usage: input_file\n");
-    av_log(NULL, AV_LOG_INFO, "\n");
+    av_log(NULL, AV_LOG_INFO, "Simple media player based on ffplay\n");
+    av_log(NULL, AV_LOG_INFO, "Usage: ffplay-debug-helper [options] input_file\n\n");
+    av_log(NULL, AV_LOG_INFO, "Key options:\n");
+    av_log(NULL, AV_LOG_INFO, "  -i <file>               Explicitly set the input file/URL\n");
+    av_log(NULL, AV_LOG_INFO, "  -fs                     Start in full screen mode\n");
+    av_log(NULL, AV_LOG_INFO, "  -x <w> -y <h>           Set the initial window size\n");
+    av_log(NULL, AV_LOG_INFO, "  -s <wxh>                Same as -x/-y using WxH syntax\n");
+    av_log(NULL, AV_LOG_INFO, "  -an / -vn / -sn         Disable audio / video / subtitles\n");
+    av_log(NULL, AV_LOG_INFO, "  -volume <0-100>         Set startup volume (percentage)\n");
+    av_log(NULL, AV_LOG_INFO, "  -ss <time>              Seek to the given start position\n");
+    av_log(NULL, AV_LOG_INFO, "  -t <time>               Play only the given duration\n");
+    av_log(NULL, AV_LOG_INFO, "  -loop <count>           Loop playback (-1 for infinite)\n");
+    av_log(NULL, AV_LOG_INFO, "  -vf / -af <filter>      Apply video or audio filters\n");
+    av_log(NULL, AV_LOG_INFO, "  -showmode <mode>        video | waves | rdft\n");
+    av_log(NULL, AV_LOG_INFO, "  -sync <type>            audio | video | ext\n");
+    av_log(NULL, AV_LOG_INFO, "  -hwaccel <name>         Enable the given hardware accel\n");
+    av_log(NULL, AV_LOG_INFO, "  -format <name>          Force input format (alias: -f)\n");
+    av_log(NULL, AV_LOG_INFO, "  -loglevel <level>       Set FFmpeg logging verbosity\n");
+    av_log(NULL, AV_LOG_INFO, "Use -- to stop option parsing. Unrecognised options abort with an error.\n\n");
 }
 
 static void sigterm_handler(int sig)
@@ -2833,8 +3011,169 @@ static void sigterm_handler(int sig)
     exit(123);
 }
 
-#undef main
-int main()
+static void parse_command_line(int argc, char **argv)
+{
+    bool allow_options = true;
+    for (int i = 1; i < argc; ++i) {
+        const char *arg = argv[i];
+        if (!arg)
+            continue;
+        if (allow_options && !strcmp(arg, "--")) {
+            allow_options = false;
+            continue;
+        }
+        if (allow_options && arg[0] == '-' && arg[1] != '\0') {
+            std::string option_name(arg);
+            std::string inline_value;
+            const char *value_ptr = nullptr;
+            size_t eq_pos = option_name.find('=');
+            if (eq_pos != std::string::npos) {
+                inline_value = option_name.substr(eq_pos + 1);
+                option_name.erase(eq_pos);
+                value_ptr = inline_value.c_str();
+            }
+            auto require_value = [&](const std::string &name) -> const char* {
+                if (value_ptr) {
+                    const char *tmp = value_ptr;
+                    value_ptr = nullptr;
+                    return tmp;
+                }
+                if (i + 1 >= argc)
+                    option_fail(name.c_str(), "Missing value");
+                return argv[++i];
+            };
+
+            if (option_name == "-h" || option_name == "--help") {
+                show_usage();
+                exit(0);
+            } else if (option_name == "-version" || option_name == "--version") {
+                av_log(NULL, AV_LOG_INFO, "ffplay-debug-helper built on FFmpeg %s\n", av_version_info());
+                exit(0);
+            } else if (option_name == "-i") {
+                const char *value = require_value(option_name);
+                assign_string_option(&input_filename, value, option_name.c_str());
+            } else if (option_name == "-fs" || option_name == "--fullscreen") {
+                is_full_screen = 1;
+            } else if (option_name == "-an" || option_name == "--audio-disable") {
+                audio_disable = 1;
+            } else if (option_name == "-vn" || option_name == "--video-disable") {
+                video_disable = 1;
+            } else if (option_name == "-sn" || option_name == "--subtitle-disable") {
+                subtitle_disable = 1;
+            } else if (option_name == "-nodisp" || option_name == "--no-display") {
+                display_disable = 1;
+            } else if (option_name == "-noborder") {
+                borderless = 1;
+            } else if (option_name == "-alwaysontop") {
+                alwaysontop = 1;
+            } else if (option_name == "-autoexit") {
+                autoexit = 1;
+            } else if (option_name == "-exitonkeydown") {
+                exit_on_keydown = 1;
+            } else if (option_name == "-exitonmousedown") {
+                exit_on_mousedown = 1;
+            } else if (option_name == "-stats") {
+                show_status = 1;
+            } else if (option_name == "-nostats") {
+                show_status = 0;
+            } else if (option_name == "-bytes") {
+                seek_by_bytes = 1;
+            } else if (option_name == "-nobytes") {
+                seek_by_bytes = 0;
+            } else if (option_name == "-fast") {
+                fast = 1;
+            } else if (option_name == "-genpts") {
+                genpts = 1;
+            } else if (option_name == "-infbuf") {
+                infinite_buffer = 1;
+            } else if (option_name == "-find_stream_info") {
+                find_stream_info = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-x") {
+                screen_width = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-y") {
+                screen_height = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-s") {
+                parse_window_size(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-loop") {
+                loop = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-volume") {
+                startup_volume = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-seek_interval") {
+                seek_interval = static_cast<float>(parse_double_option(option_name.c_str(), require_value(option_name)));
+            } else if (option_name == "-rdftspeed") {
+                rdftspeed = parse_double_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-showmode") {
+                show_mode = parse_showmode(require_value(option_name));
+            } else if (option_name == "-sync") {
+                av_sync_type = parse_sync_type(require_value(option_name));
+            } else if (option_name == "-framedrop") {
+                framedrop = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-threads" || option_name == "-filter_threads") {
+                filter_nbthreads = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-hwaccel") {
+                assign_string_option(&hwaccel, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-enable_vulkan") {
+                enable_vulkan = 1;
+            } else if (option_name == "-disable_vulkan") {
+                enable_vulkan = 0;
+            } else if (option_name == "-vulkan_params") {
+                assign_string_option(&vulkan_params, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-vf") {
+                set_video_filters(require_value(option_name));
+            } else if (option_name == "-af") {
+                assign_string_option(&afilters, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-window_title" || option_name == "--window-title") {
+                assign_string_option(&window_title, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-left") {
+                screen_left = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-top") {
+                screen_top = parse_int_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-ast") {
+                set_stream_specifier(AVMEDIA_TYPE_AUDIO, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-vst") {
+                set_stream_specifier(AVMEDIA_TYPE_VIDEO, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-sst") {
+                set_stream_specifier(AVMEDIA_TYPE_SUBTITLE, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-acodec" || option_name == "-c:a" || option_name == "-codec:a") {
+                assign_string_option(&audio_codec_name, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-vcodec" || option_name == "-c:v" || option_name == "-codec:v") {
+                assign_string_option(&video_codec_name, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-scodec" || option_name == "-c:s" || option_name == "-codec:s") {
+                assign_string_option(&subtitle_codec_name, require_value(option_name), option_name.c_str());
+            } else if (option_name == "-ss" || option_name == "-start_time") {
+                start_time = parse_time_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-t" || option_name == "-duration") {
+                duration = parse_time_option(option_name.c_str(), require_value(option_name));
+            } else if (option_name == "-format" || option_name == "-f" || option_name == "-iformat") {
+                const char *fmt_name = require_value(option_name);
+                const AVInputFormat *fmt = av_find_input_format(fmt_name);
+                if (!fmt)
+                    option_fail(option_name.c_str(), "Unknown input format", fmt_name);
+                file_iformat = fmt;
+            } else if (option_name == "-loglevel" || option_name == "-v") {
+                av_log_set_level(parse_log_level_option(require_value(option_name)));
+            } else if (option_name == "-rtsp_transport") {
+                av_dict_set(&format_opts, "rtsp_transport", require_value(option_name), 0);
+            } else if (option_name == "-stimeout") {
+                av_dict_set(&format_opts, "stimeout", require_value(option_name), 0);
+            } else if (option_name == "-analyzeduration") {
+                av_dict_set(&format_opts, "analyzeduration", require_value(option_name), 0);
+            } else if (option_name == "-probesize") {
+                av_dict_set(&format_opts, "probesize", require_value(option_name), 0);
+            } else if (option_name == "-fflags") {
+                av_dict_set(&format_opts, "fflags", require_value(option_name), 0);
+            } else {
+                option_fail(option_name.c_str(), "Unknown option");
+            }
+        } else {
+            if (input_filename)
+                option_fail(arg, "Only one input file is supported");
+            assign_string_option(&input_filename, arg, "input");
+        }
+    }
+}
+
+int ffplay_main(int argc, char **argv)
 {
     int flags, ret;
     VideoState *is = nullptr;
@@ -2849,9 +3188,7 @@ int main()
 
     av_log_set_level(AV_LOG_INFO);
 
-    input_filename = "D:/Videos/Attack.on.Titan.The.Final.Chapters.Part2.S04E30.1080p.WEB-DL.Hi10.Chs&Cht&Eng.DDP.2.0.H.264-Q66.mkv";    //"D:/Videos/Attack.on.Titan.The.Final.Chapters.Part2.S04E30.1080p.WEB-DL.Hi10.Chs&Cht&Eng.DDP.2.0.H.264-Q66.mkv"
-    screen_width  = 640;
-    screen_height = 480; 
+    parse_command_line(argc, argv);
 
     if (!input_filename) {
         show_usage();
@@ -2859,12 +3196,12 @@ int main()
         exit(1);
     }
 
+    if (!window_title)
+        assign_string_option(&window_title, input_filename, "window_title");
+
     if (display_disable) {
         video_disable = 1;
     }
-
-    // audio_disable = 1;
-    // subtitle_disable = 1;
 
     flags = SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER;
     if (audio_disable)
@@ -2887,17 +3224,17 @@ int main()
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
 
     if (!display_disable) {
-        int flags = SDL_WINDOW_HIDDEN;
+        int window_flags = SDL_WINDOW_HIDDEN;
         if (alwaysontop)
 #if SDL_VERSION_ATLEAST(2,0,5)
-            flags |= SDL_WINDOW_ALWAYS_ON_TOP;
+            window_flags |= SDL_WINDOW_ALWAYS_ON_TOP;
 #else
             av_log(NULL, AV_LOG_WARNING, "Your SDL version doesn't support SDL_WINDOW_ALWAYS_ON_TOP. Feature will be inactive.\n");
 #endif
         if (borderless)
-            flags |= SDL_WINDOW_BORDERLESS;
+            window_flags |= SDL_WINDOW_BORDERLESS;
         else
-            flags |= SDL_WINDOW_RESIZABLE;
+            window_flags |= SDL_WINDOW_RESIZABLE;
 
 #ifdef SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR
         SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
@@ -2910,14 +3247,14 @@ int main()
             vk_renderer = vk_get_renderer();
             if (vk_renderer) {
 #if SDL_VERSION_ATLEAST(2, 0, 6)
-                flags |= SDL_WINDOW_VULKAN;
+                window_flags |= SDL_WINDOW_VULKAN;
 #endif
             } else {
                 av_log(NULL, AV_LOG_WARNING, "Doesn't support vulkan renderer, fallback to SDL renderer\n");
                 enable_vulkan = 0;
             }
         }
-        window = SDL_CreateWindow(input_filename, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, default_width, default_height, flags);
+        window = SDL_CreateWindow(window_title, screen_left, screen_top, default_width, default_height, window_flags);
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
         if (!window) {
             av_log(NULL, AV_LOG_FATAL, "Failed to create window: %s", SDL_GetError());
@@ -2952,7 +3289,6 @@ int main()
         }
     }
 
-    //打开音频流和视频流
     is = stream_open(input_filename, file_iformat);
     if(!is)
     {
@@ -2960,7 +3296,6 @@ int main()
         do_exit(nullptr);
     }
 
-    //SDL事件循环处理
     event_loop(is);
 
     return 0;
