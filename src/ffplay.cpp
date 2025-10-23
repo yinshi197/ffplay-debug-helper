@@ -1,5 +1,7 @@
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <inttypes.h>
 #include <iostream>
 #include <string>
 #include "datactl.h"
@@ -117,6 +119,175 @@ static void parse_window_size(const char *opt, const char *value)
         option_fail(opt, "Invalid size specification", value);
     screen_width = w;
     screen_height = h;
+}
+
+static std::string format_time_from_us(int64_t us)
+{
+    if (us == AV_NOPTS_VALUE)
+        return "N/A";
+    char sign = 0;
+    if (us < 0) {
+        sign = '-';
+        us = -us;
+    }
+    const int64_t total_ms = us / 1000;
+    const int64_t hours = total_ms / 3600000;
+    const int64_t minutes = (total_ms % 3600000) / 60000;
+    const int64_t seconds = (total_ms % 60000) / 1000;
+    const int64_t milliseconds = total_ms % 1000;
+    char buf[64];
+    if (sign)
+        snprintf(buf, sizeof(buf), "%c%02" PRId64 ":%02" PRId64 ":%02" PRId64 ".%03" PRId64,
+                 sign, hours, minutes, seconds, milliseconds);
+    else
+        snprintf(buf, sizeof(buf), "%02" PRId64 ":%02" PRId64 ":%02" PRId64 ".%03" PRId64,
+                 hours, minutes, seconds, milliseconds);
+    return std::string(buf);
+}
+
+static std::string format_bit_rate(int64_t bit_rate)
+{
+    if (bit_rate <= 0)
+        return "N/A";
+    char buf[64];
+    const double kbps = bit_rate / 1000.0;
+    if (kbps >= 1000.0)
+        snprintf(buf, sizeof(buf), "%.2f Mbps", kbps / 1000.0);
+    else
+        snprintf(buf, sizeof(buf), "%.0f kbps", kbps);
+    return std::string(buf);
+}
+
+static void log_metadata_dictionary(const AVDictionary *dict, const char *indent)
+{
+    if (!dict) {
+        av_log(NULL, AV_LOG_INFO, "%s<none>\n", indent);
+        return;
+    }
+    bool has_entries = false;
+    AVDictionaryEntry *tag = nullptr;
+    while ((tag = av_dict_get(dict, "", tag, AV_DICT_IGNORE_SUFFIX))) {
+        has_entries = true;
+        av_log(NULL, AV_LOG_INFO, "%s%s: %s\n", indent, tag->key, tag->value ? tag->value : "");
+    }
+    if (!has_entries)
+        av_log(NULL, AV_LOG_INFO, "%s<none>\n", indent);
+}
+
+static void dump_input_metadata(const AVFormatContext *ic)
+{
+    if (!ic)
+        return;
+
+    const char *format_name = ic->iformat ? ic->iformat->long_name : nullptr;
+    if (!format_name || !format_name[0])
+        format_name = ic->iformat ? ic->iformat->name : "unknown";
+
+    av_log(NULL, AV_LOG_INFO, "---------------- Media Summary ----------------\n");
+    av_log(NULL, AV_LOG_INFO, "Input: %s\n", ic->url ? ic->url : "<stdin>");
+    av_log(NULL, AV_LOG_INFO, "Format: %s\n", format_name ? format_name : "unknown");
+    av_log(NULL, AV_LOG_INFO, "Duration: %s\n", format_time_from_us(ic->duration).c_str());
+    av_log(NULL, AV_LOG_INFO, "Start time: %s\n", format_time_from_us(ic->start_time).c_str());
+    av_log(NULL, AV_LOG_INFO, "Bit rate: %s\n", format_bit_rate(ic->bit_rate).c_str());
+
+    av_log(NULL, AV_LOG_INFO, "Metadata:\n");
+    log_metadata_dictionary(ic->metadata, "  ");
+
+    for (unsigned int i = 0; i < ic->nb_streams; ++i) {
+        const AVStream *st = ic->streams[i];
+        const AVCodecParameters *par = st->codecpar;
+        const char *type = av_get_media_type_string(par->codec_type);
+        if (!type)
+            type = "unknown";
+
+        const AVCodecDescriptor *desc = avcodec_descriptor_get(par->codec_id);
+        const char *codec_name = desc ? desc->long_name : avcodec_get_name(par->codec_id);
+        av_log(NULL, AV_LOG_INFO, "Stream #%u: %s (%s)\n", i, type, codec_name ? codec_name : "unknown");
+
+        switch (par->codec_type) {
+        case AVMEDIA_TYPE_VIDEO: {
+            double fps = av_q2d(st->avg_frame_rate);
+            if (fps <= 0.0 && st->r_frame_rate.num)
+                fps = av_q2d(st->r_frame_rate);
+            if (fps > 0.0)
+                av_log(NULL, AV_LOG_INFO, "    Resolution: %dx%d @ %.2f FPS\n", par->width, par->height, fps);
+            else
+                av_log(NULL, AV_LOG_INFO, "    Resolution: %dx%d\n", par->width, par->height);
+            if (par->bit_rate > 0)
+                av_log(NULL, AV_LOG_INFO, "    Bit rate: %s\n", format_bit_rate(par->bit_rate).c_str());
+            break;
+        }
+        case AVMEDIA_TYPE_AUDIO: {
+            char layout[128];
+            if (av_channel_layout_describe(&par->ch_layout, layout, sizeof(layout)) < 0)
+                snprintf(layout, sizeof(layout), "%d channels", par->ch_layout.nb_channels);
+            av_log(NULL, AV_LOG_INFO, "    Sample rate: %d Hz\n", par->sample_rate);
+            av_log(NULL, AV_LOG_INFO, "    Layout: %s\n", layout);
+            if (par->bit_rate > 0)
+                av_log(NULL, AV_LOG_INFO, "    Bit rate: %s\n", format_bit_rate(par->bit_rate).c_str());
+            break;
+        }
+        case AVMEDIA_TYPE_SUBTITLE:
+            av_log(NULL, AV_LOG_INFO, "    Subtitle codec id: %d\n", par->codec_id);
+            break;
+        default:
+            break;
+        }
+
+        if (st->metadata) {
+            av_log(NULL, AV_LOG_INFO, "    Metadata:\n");
+            log_metadata_dictionary(st->metadata, "      ");
+        }
+    }
+
+    av_log(NULL, AV_LOG_INFO, "------------------------------------------------\n");
+}
+
+static void list_audio_output_devices_and_exit(void)
+{
+    if (SDL_Init(SDL_INIT_AUDIO) != 0) {
+        av_log(NULL, AV_LOG_FATAL, "Unable to initialise SDL audio subsystem: %s\n", SDL_GetError());
+        exit(1);
+    }
+
+    av_log(NULL, AV_LOG_INFO, "Available SDL audio drivers:\n");
+    int driver_count = SDL_GetNumAudioDrivers();
+    for (int i = 0; i < driver_count; ++i)
+        av_log(NULL, AV_LOG_INFO, "  %s\n", SDL_GetAudioDriver(i));
+    if (driver_count == 0)
+        av_log(NULL, AV_LOG_INFO, "  <none>\n");
+
+    const char *current_driver = SDL_GetCurrentAudioDriver();
+    av_log(NULL, AV_LOG_INFO, "Current SDL audio driver: %s\n", current_driver ? current_driver : "<not initialised>");
+
+    int playback_devices = SDL_GetNumAudioDevices(0);
+    if (playback_devices < 0) {
+        av_log(NULL, AV_LOG_WARNING, "Failed to query playback devices: %s\n", SDL_GetError());
+    } else {
+        av_log(NULL, AV_LOG_INFO, "Playback devices:\n");
+        for (int i = 0; i < playback_devices; ++i) {
+            const char *name = SDL_GetAudioDeviceName(i, 0);
+            av_log(NULL, AV_LOG_INFO, "  %s\n", name ? name : "<unknown>");
+        }
+        if (playback_devices == 0)
+            av_log(NULL, AV_LOG_INFO, "  <none>\n");
+    }
+
+    int capture_devices = SDL_GetNumAudioDevices(1);
+    if (capture_devices < 0) {
+        av_log(NULL, AV_LOG_WARNING, "Failed to query capture devices: %s\n", SDL_GetError());
+    } else {
+        av_log(NULL, AV_LOG_INFO, "Capture devices:\n");
+        for (int i = 0; i < capture_devices; ++i) {
+            const char *name = SDL_GetAudioDeviceName(i, 1);
+            av_log(NULL, AV_LOG_INFO, "  %s\n", name ? name : "<unknown>");
+        }
+        if (capture_devices == 0)
+            av_log(NULL, AV_LOG_INFO, "  <none>\n");
+    }
+
+    SDL_Quit();
+    exit(0);
 }
 
 static VideoState::ShowMode parse_showmode(const char *value)
@@ -1728,6 +1899,9 @@ int read_thread(void *arg)
     if (show_status)
         av_dump_format(ic, 0, is->filename, 0);
 
+    if (dump_media_info)
+        dump_input_metadata(ic);
+
     for (i = 0; i < ic->nb_streams; i++) {
         AVStream *st = ic->streams[i];
         enum AVMediaType type = st->codecpar->codec_type;
@@ -3003,6 +3177,8 @@ static void show_usage(void)
     av_log(NULL, AV_LOG_INFO, "  -hwaccel <name>         Enable the given hardware accel\n");
     av_log(NULL, AV_LOG_INFO, "  -format <name>          Force input format (alias: -f)\n");
     av_log(NULL, AV_LOG_INFO, "  -loglevel <level>       Set FFmpeg logging verbosity\n");
+    av_log(NULL, AV_LOG_INFO, "  --dump-metadata         Print an input metadata summary\n");
+    av_log(NULL, AV_LOG_INFO, "  --list-audio-devices    List SDL audio drivers/devices and exit\n");
     av_log(NULL, AV_LOG_INFO, "Use -- to stop option parsing. Unrecognised options abort with an error.\n\n");
 }
 
@@ -3162,6 +3338,10 @@ static void parse_command_line(int argc, char **argv)
                 av_dict_set(&format_opts, "probesize", require_value(option_name), 0);
             } else if (option_name == "-fflags") {
                 av_dict_set(&format_opts, "fflags", require_value(option_name), 0);
+            } else if (option_name == "--dump-metadata" || option_name == "-dump_metadata") {
+                dump_media_info = 1;
+            } else if (option_name == "--list-audio-devices" || option_name == "-list-audio-devices") {
+                list_audio_devices = 1;
             } else {
                 option_fail(option_name.c_str(), "Unknown option");
             }
@@ -3189,6 +3369,9 @@ int ffplay_main(int argc, char **argv)
     av_log_set_level(AV_LOG_INFO);
 
     parse_command_line(argc, argv);
+
+    if (list_audio_devices)
+        list_audio_output_devices_and_exit();
 
     if (!input_filename) {
         show_usage();

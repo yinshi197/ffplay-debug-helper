@@ -495,6 +495,8 @@ static int64_t duration = AV_NOPTS_VALUE;       // 播放时长
 static int autoexit;
 static int fast = 0;    //加速解码
 static int find_stream_info = 1;
+static int dump_media_info = 0;          // 打印输入媒体的元数据摘要
+static int list_audio_devices = 0;       // 列出SDL可用音频设备
 
 //====================== 跨模块事件 ======================
 #define FF_QUIT_EVENT (SDL_USEREVENT + 2) // 自定义退出事件（线程间通信）
