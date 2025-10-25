@@ -56,7 +56,7 @@ static void set_video_filters(const char *filters)
     reset_video_filters();
     if (!filters)
         return;
-    vfilters_list = static_cast<char **>(av_mallocz_array(1, sizeof(*vfilters_list)));
+    vfilters_list = static_cast<char **>(av_malloc_array(1, sizeof(*vfilters_list)));
     if (!vfilters_list)
         option_fail("-vf", "Unable to allocate video filter array");
     vfilters_list[0] = av_strdup(filters);
