@@ -1153,9 +1153,13 @@ int cmp_audio_fmts(enum AVSampleFormat fmt1, int64_t channel_count1,
         return channel_count1 != channel_count2 || fmt1 != fmt2;
 }
 
+/*audio_thread（）函数是音频解码线程的核心部分，主要完成以下任务：从音频解码
+器 (auddec) 中获取音频帧。在必要时重新配置音频过滤器（如采样率、声道布局或音频
+格式变化）。将解码后的音频帧通过音频过滤器进行处理，并写入音频帧队列 sampq。*/
 static int audio_thread(void *arg)
 {
     VideoState *is = reinterpret_cast<VideoState*>(arg);
+    /*为接收解码后的音频帧分配内存。AVFrame 用于存储解码后的 PCM数据（未压缩音频数据）*/
     AVFrame *frame = av_frame_alloc();
     Frame *af;
     int last_serial = -1;
@@ -1168,10 +1172,13 @@ static int audio_thread(void *arg)
         return AVERROR(ENOMEM);
 
     do {
+        /*从音频包队列 (audioq) 中取出压缩音频数据，交给解码器进行解码，输出 PCM 音频数据。*/
         if ((got_frame = decoder_decode_frame(&is->audio.auddec, frame, NULL)) < 0)
             goto the_end;
 
         if (got_frame) {
+                /*如果音频帧的格式、采样率、声道布局发生变化，重新配置音频过滤器，确保音频输出设备能够正确播放。
+                如果老秦突然切换音频质量（例如从单声道切换到立体声），播放器需要重新调整音频参数，重新配置音频过滤器，保证音频的正常播放。*/
                 tb = (AVRational){1, frame->sample_rate};
 
                 reconfigure =
@@ -1200,10 +1207,12 @@ static int audio_thread(void *arg)
                     if ((ret = configure_audio_filters(is, afilters, 1)) < 0)
                         goto the_end;
                 }
-
+            /*从过滤器获取处理后的音频帧        入口
+            在播放 48kHz 采样率的音频时，如果音频设备只支持 44.1kHz，
+            av_buffersrc_add_frame 将解码后的数据送入重采样过滤器，转换成 44.1kHz 数据再输出。*/
             if ((ret = av_buffersrc_add_frame(is->in_audio_filter, frame)) < 0)
                 goto the_end;
-
+            // 从过滤器获取处理后的音频帧       出口
             while ((ret = av_buffersink_get_frame_flags(is->out_audio_filter, frame, 0)) >= 0) {
                 FrameData *fd = frame->opaque_ref ? (FrameData*)frame->opaque_ref->data : NULL;
                 tb = av_buffersink_get_time_base(is->out_audio_filter);
@@ -1214,18 +1223,25 @@ static int audio_thread(void *arg)
                 af->pos = fd ? fd->pkt_pos : -1;
                 af->serial = is->audio.auddec.pkt_serial;
                 af->duration = av_q2d((AVRational){frame->nb_samples, frame->sample_rate});
-
-                av_frame_move_ref(af->frame, frame);
+                /*写入音频帧队列 (sampq)：
+                    将处理后的音频帧写入音频帧队列 (sampq)，供音频播放线程读取并播放。*/
+                // 把过滤器输出的音频 frame 内容移动到队列里的 af->frame
+                av_frame_move_ref(af->frame, frame); 
+                // 提交这个队列槽位，让消费者可以读取
                 frame_queue_push(&is->audio.sampq);
 
                 if (is->audio.audioq.serial != is->audio.auddec.pkt_serial)
                     break;
             }
+            /*设置音频解码完成标志：当解码器处理到音频流的结尾时，
+                设置解码完成标志auddec.finished，通知播放器停止读取和播放音频。*/
             if (ret == AVERROR_EOF)
                 is->audio.auddec.finished = is->audio.auddec.pkt_serial;
         }
     } while (ret >= 0 || ret == AVERROR(EAGAIN) || ret == AVERROR_EOF);
  the_end:
+    /* 清理资源并退出线程：
+        音频播放结束或遇到错误时，释放 AVFrame 和音频过滤器资源，确保线程安全退出。*/
     avfilter_graph_free(&is->agraph);
     av_frame_free(&frame);
     return ret;
@@ -1447,10 +1463,15 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
     return got_picture;
 }
 
-//解码
+/*video_thread 是视频解码线程的核心函数，主要完成以下任务，
+从视频解码器获取视频帧：调用 get_video_frame 从视频队列中获取解码后的视频帧。
+重新配置视频过滤器（若必要）：检查视频帧的分辨率、格式等参数是否发生变化，动态重建视频过滤器链。
+计算帧的显示时间：根据帧率与时间基计算视频帧的持续时间（duration）和显示时间戳（PTS）。
+调用 queue_picture 将处理好的视频帧推送到显示队列，供视频播放线程显示。*/
 static int video_thread(void *arg)
 {
     VideoState *is = reinterpret_cast<VideoState*>(arg);
+    /*为解码后的视频帧分配内存空间，存储视频数据。*/
     AVFrame *frame = av_frame_alloc();
     double pts;
     double duration;
@@ -1470,12 +1491,16 @@ static int video_thread(void *arg)
         return AVERROR(ENOMEM);
 
     for (;;) {
+        /*  从视频包队列中获取视频数据包并解码，输出一帧视频数据。
+            在视频播放器中，每一帧视频（如 MP4 文件的 H.264 帧）会被解码成一张图像，
+            送到 frame 中等待显示。*/
         ret = get_video_frame(is, frame);
         if (ret < 0)
             goto the_end;
         if (!ret)
             continue;
-
+        /*  检查帧参数变化：检测视频帧的分辨率、像素格式或序列号是否发生变化，
+            决定是否重新配置视频过滤器。*/
         if (   last_w != frame->width
             || last_h != frame->height
             || last_format != frame->format
@@ -1487,6 +1512,9 @@ static int video_thread(void *arg)
                    (const char *)av_x_if_null(av_get_pix_fmt_name(last_format), "none"), last_serial,
                    frame->width, frame->height,
                    (const char *)av_x_if_null(av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)), "none"), is->video.viddec.pkt_serial);
+            
+            /*重新配置视频过滤器：重新构建视频过滤器图（如缩放、格式转换等），确保新的视频帧能够正确处理。
+            视频切换清晰度（如从高清到标清）时，过滤器需要重新设置缩放参数，将帧转换成目标分辨率。*/
             avfilter_graph_free(&graph);
             graph = avfilter_graph_alloc();
             if (!graph) {
@@ -1501,6 +1529,7 @@ static int video_thread(void *arg)
                 SDL_PushEvent(&event);
                 goto the_end;
             }
+            /*配置完成后保存新的输入/输出 filter*/
             filt_in  = is->in_video_filter;
             filt_out = is->out_video_filter;
             last_w = frame->width;
@@ -1529,14 +1558,19 @@ static int video_thread(void *arg)
             }
 
             fd = frame->opaque_ref ? (FrameData*)frame->opaque_ref->data : NULL;
-
+            /*计算帧的持续时间与 PTS：根据帧率和时间基计算每一帧的持续时间（duration）和显示时间戳（PTS）。
+                在视频播放中，每一帧都有播放时间戳，确保画面按照正确的时间显示，避免卡顿或音画不同步。*/
             is->video.frame_last_filter_delay = av_gettime_relative() / 1000000.0 - is->video.frame_last_returned_time;
             if (fabs(is->video.frame_last_filter_delay) > AV_NOSYNC_THRESHOLD / 10.0)
                 is->video.frame_last_filter_delay = 0;
             tb = av_buffersink_get_time_base(filt_out);
             duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
             pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
+            /*调用 queue_picture 推送视频帧：将处理好的视频帧推入显示队列，供渲染线程读取并显示。
+            播放器会将一帧画面推送到显示队列，视频渲染线程会按照时间顺序取出帧进行显示，保证流畅播放。*/
             ret = queue_picture(is, frame, pts, duration, fd ? fd->pkt_pos : -1, is->video.viddec.pkt_serial);
+            /*释放当前帧引用：释放 AVFrame 的引用计数，防止内存泄漏，为下次帧解码腾出空间。
+            在播放视频时，已经显示的帧不再需要，释放内存以解码下一帧，提升性能。*/
             av_frame_unref(frame);
             if (is->video.videoq.serial != is->video.viddec.pkt_serial)
                 break;
@@ -1797,7 +1831,8 @@ static void step_to_next_frame(VideoState *is)
     is->step = 1;
 }
 
-//读取数据线程
+
+/*读取数据线程*/
 int read_thread(void *arg)
 {
     VideoState *is = reinterpret_cast<VideoState*>(arg);
@@ -1821,6 +1856,7 @@ int read_thread(void *arg)
     }
 
     /* 初始化关键数据结构 */
+    // FFplay 将所有流索引初始化为 -1，主要表示尚未找到对应的音频、视频或者字幕流。
     memset(st_index, -1, sizeof(st_index)); // 流索引初始化为-1
     is->eof = 0;                            // 重置EOF标志
 
@@ -1831,7 +1867,11 @@ int read_thread(void *arg)
         goto fail;
     }
 
-    /* 初始化格式上下文 */
+    /*  初始化格式上下文
+        用于存储媒体文件的格式信息，如文件类型 MP4、流信息等。
+        此外，还会设置中断回调函数，以应对用户界面线程的中断操作。
+        （用户中断播放的时候，会被调用）
+    */
     if (!(ic = avformat_alloc_context())) {
         av_log(NULL, AV_LOG_FATAL, "Could not allocate context.\n");
         ret = AVERROR(ENOMEM);
@@ -1845,6 +1885,7 @@ int read_thread(void *arg)
     }
 
     /* 打开媒体文件并解析格式 */
+    ///@note 打开输入文件 打开指定媒体文件，读取文件头并始化流信息。 
     if ((err = avformat_open_input(&ic, is->filename, is->iformat, nullptr)) < 0) {
         av_strerror(err, error, 128);
         av_log(nullptr, AV_LOG_DEBUG, "avformat_open_input to faild, error info: %s\n", error);
@@ -1853,6 +1894,9 @@ int read_thread(void *arg)
     }
     is->ic = ic; // 将格式上下文绑定到视频状态对象
 
+    /* 媒体文件可能缺少 PTS 时间戳。FFplay 可以启用 PTS 生成选项，让
+    FFmpeg 自动生成 PTS，确保播放同步。此外，还会注入全局侧数据，确保格式上下文包
+    含必要的全局信息。*/
     if (genpts)
         ic->flags |= AVFMT_FLAG_GENPTS;
 
@@ -1867,6 +1911,7 @@ int read_thread(void *arg)
     if (ic->pb)
         ic->pb->eof_reached = 0; // FIXME hack, ffplay maybe should not use avio_feof() to test for the end
 
+    /*自动决定 seek 时按“字节位置”还是按“时间戳”。*/
     if (seek_by_bytes < 0)
     seek_by_bytes = !(ic->iformat->flags & AVFMT_NO_BYTE_SEEK) &&
                     !!(ic->iformat->flags & AVFMT_TS_DISCONT) &&
@@ -1969,16 +2014,20 @@ int read_thread(void *arg)
     if (infinite_buffer < 0 && is->realtime)
         infinite_buffer = 1;    //开启无限缓冲区
     
-    /* 主读取循环 */
+    /* 主读取循环 
+    read_thread() 的核心部分是主读取循环，不断从媒体文件中读取数据包，并将其分
+    发到相应的队列中进行处理。*/
     for (;;) {
-        if (is->abort_request) break; // 收到终止请求
+        if (is->abort_request) break; // 检查退出请求
 
         /* 处理暂停状态切换 */
         if (is->paused != is->last_paused) {
             is->last_paused = is->paused;
             if (is->paused)
+                // 请求底层输入源暂停读取。
                 is->read_pause_return = av_read_pause(ic);
             else
+                // 如果播放器进入暂停状态，通知输入源暂停。
                 av_read_play(ic);
         }
 
@@ -1988,6 +2037,7 @@ int read_thread(void *arg)
              (ic->pb && !strncmp(input_filename, "mmsh:", 5)))) {
             /* wait 10 ms to avoid trying to get another packet */
             /* XXX: horrible */
+            /* 暂停期间 read thread 基本只是在： 睡 10ms -> 检查是否还暂停 -> 睡 10ms -> ...*/
             SDL_Delay(10);
             continue;
         }
@@ -2005,6 +2055,8 @@ int read_thread(void *arg)
                 av_log(NULL, AV_LOG_ERROR,
                        "%s: error while seeking\n", is->ic->url);
             } else {
+                /*SEEK成功后，会清空各流的数据包队列，插入空数据包，
+                    更新播放时钟，并准备处理附件数据（如封面图像）*/
                 if (is->audio_stream >= 0)
                     packet_queue_flush(&is->audio.audioq);
                 if (is->subtitle_stream >= 0)
@@ -2024,7 +2076,7 @@ int read_thread(void *arg)
                 step_to_next_frame(is);
         }
 
-        //处理媒体文件内嵌的附件资源（如专辑封面、静态缩略图）
+        //处理媒体文件内嵌的附件资源（如网易云的专辑封面、静态缩略图）
         if (is->queue_attachments_req) {
             if (is->video.video_st && is->video.video_st->disposition & AV_DISPOSITION_ATTACHED_PIC) {
                 if ((ret = av_packet_ref(pkt, &is->video.video_st->attached_pic)) < 0)
@@ -2035,7 +2087,11 @@ int read_thread(void *arg)
             is->queue_attachments_req = 0;
         }
 
-        /* if the queue are full, no need to read more */
+        /* if the queue are full, no need to read more 
+            如果队列已满，暂停读取数据包，等待队列中的数据被处理。
+            比如腾讯视频，如果缓冲区已满，播放器会暂停下载新数据
+            (就是视频条下面的浅白的进度条会不动，那个其实就是缓存视频数据)，
+            等待缓冲区中的数据被播放。*/
         if (infinite_buffer<1 &&
                 (is->audio.audioq.size + is->video.videoq.size + is->subtitle.subtitleq.size > MAX_QUEUE_SIZE
             || (stream_has_enough_packets(is->audio.audio_st, is->audio_stream, &is->audio.audioq) &&
@@ -2057,7 +2113,10 @@ int read_thread(void *arg)
                 goto fail;
             }
         }
-        /* 读取媒体帧 */
+        /*  读取媒体帧 
+            如果读取成功，重置 eof 标志；
+            如果读取失败（如达到文件结束或发生错误），执行相应的处理，
+            如插入空数据包或记录错误。*/
         if ((ret = av_read_frame(ic, pkt)) < 0) {
             // 处理流结束情况
             if ((ret == AVERROR_EOF || avio_feof(ic->pb)) && !is->eof) {
@@ -2079,11 +2138,14 @@ int read_thread(void *arg)
             SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
             SDL_UnlockMutex(wait_mutex);
             continue;
-        } else {
+        } else {  // 读取成功
             is->eof = 0;
         }
 
-        /* check if packet is in play range specified by user, then queue, otherwise discard */
+        /* check if packet is in play range specified by user, then queue, otherwise discard 
+            FFplay 检查读取到的数据包是否在用户指定的播放范围内。如果在范围内，将其放入
+            相应的音频、视频或字幕队列；否则，释放数据包。这样可以确保只处理用户感兴趣的播放
+            范围内的数据包，优化资源使用。*/
         stream_start_time = ic->streams[pkt->stream_index]->start_time;
         pkt_ts = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
         pkt_in_play_range = AV_NOPTS_VALUE == AV_NOPTS_VALUE ||
@@ -2635,25 +2697,30 @@ static void update_video_pts(VideoState *is, double pts, int serial)
     sync_clock_to_slave(&is->extclk, &is->vidclk);
 }
 
+/*video_refresh（）是一个核心函数，负责视频画面的刷新和与播放同步的逻辑处理。
+它实现了画面显示、跳帧逻辑、视频同步、字幕管理等功能。*/
 static void video_refresh(void *opaque, double *remaining_time)
 {
     VideoState *is = reinterpret_cast<VideoState*>(opaque);
     double time;
 
     Frame *sp, *sp2;
-
+    /*检查时钟速度：在外部时钟同步模式下，动态调整时钟速度，确保播放同步。
+        在直播场景中，如果网络延迟导致视频播放滞后，播放器会根据时钟偏移调整播放速度，保持与实时直播同步。*/
     if (!is->paused && get_master_sync_type(is) == AV_SYNC_EXTERNAL_CLOCK && is->realtime)
         check_external_clock_speed(is);
-
+    /*  检查显示模式：判断当前是否为视频显示模式，如果不是，则显示音频频谱或其他非视频画面。
+            在音乐播放器中，当用户只听音频时，播放器会显示音频频谱，而不是空白的视频窗口。*/        
     if (!display_disable && is->show_mode != VideoState::ShowMode::SHOW_MODE_VIDEO && is->audio.audio_st) {
         time = av_gettime_relative() / 1000000.0;
         if (is->force_refresh || is->vis.last_vis_time + rdftspeed < time) {
-            video_display(is);
+            video_display(is);  /*不是视频模式时，走音频可视化显示。*/
             is->vis.last_vis_time = time;
         }
         *remaining_time = FFMIN(*remaining_time, is->vis.last_vis_time + rdftspeed - time);
     }
-
+    /*  获取当前视频帧：从视频帧队列中获取当前帧和上一帧，为视频画面刷新做准备。
+            播放器播放视频时，会从缓存中依次读取视频帧，准备在适当的时间点显示画面。*/
     if (is->video.video_st) {
 retry:
         if (frame_queue_nb_remaining(&is->video.pictq) == 0) {
@@ -2663,9 +2730,12 @@ retry:
             Frame *vp, *lastvp;
 
             /* dequeue the picture */
+            /*检查帧序列号：验证当前帧的序列号是否有效，若序列号不匹配，跳过当前帧，避免显示错误帧。
+                当用户拖动进度条跳转到新位置时，旧帧数据被丢弃，播放器跳过过时的帧，确保新位置的画面被显示。*/
             lastvp = frame_queue_peek_last(&is->video.pictq);
             vp = frame_queue_peek(&is->video.pictq);
-
+            /*计算显示时间：根据上一帧的持续时间和时钟计算当前帧的显示时机，确保画面按正确的时间顺序显示。
+                在播放 60 帧/秒的视频时，播放器精确计算每一帧的显示间隔（约16.7 毫秒），保证画面流畅播放。*/
             if (vp->serial != is->video.videoq.serial) {
                 frame_queue_next(&is->video.pictq);
                 goto retry;
@@ -2690,12 +2760,14 @@ retry:
             is->video.frame_timer += delay;
             if (delay > 0 && time - is->video.frame_timer > AV_SYNC_THRESHOLD_MAX)
                 is->video.frame_timer = time;
-
+            /*更新时钟并显示画面：更新视频播放时钟，并将当前帧显示在屏幕上。
+                观看在线视频时，播放器确保画面与音频同步显示，避免出现“音画不同步”的问题。*/
             SDL_LockMutex(is->video.pictq.mutex);
             if (!isnan(vp->pts))
                 update_video_pts(is, vp->pts, vp->serial);
             SDL_UnlockMutex(is->video.pictq.mutex);
-
+            /*检查是否跳帧：如果当前帧的显示时间已经过期，跳过帧以保持视频播放流畅性。
+                当系统性能不足，解码速度慢时，播放器会跳过部分帧，防止画面卡顿，保证音视频同步。*/
             if (frame_queue_nb_remaining(&is->video.pictq) > 1) {
                 Frame *nextvp = frame_queue_peek_next(&is->video.pictq);
                 duration = vp_duration(is, vp, nextvp);
@@ -2705,7 +2777,8 @@ retry:
                     goto retry;
                 }
             }
-
+            /*同步字幕：将字幕与视频时钟同步，移除过期的字幕，并显示当前有效字幕。
+                在观看外语电影时，播放器会在正确的时间显示字幕内容，确保字幕与人物台词同步。*/
             if (is->subtitle.subtitle_st) {
                 while (frame_queue_nb_remaining(&is->subtitle.subpq) > 0) {
                     sp = frame_queue_peek(&is->subtitle.subpq);
@@ -2739,7 +2812,8 @@ retry:
                     }
                 }
             }
-
+            /*处理单步播放：在单步播放模式下，播放一帧画面后暂停，等待用户操作。
+                在逐帧分析视频时，用户按下按键查看每一帧画面，方便对特定画面内容进行详细分析。*/
             frame_queue_next(&is->video.pictq);
             is->force_refresh = 1;
 
@@ -2751,6 +2825,8 @@ display:
         if (!display_disable && is->force_refresh && is->show_mode == VideoState::ShowMode::SHOW_MODE_VIDEO && is->video.pictq.rindex_shown)
             video_display(is);
     }
+    /*结束本次刷新：完成当前帧的处理和显示逻辑，准备下一次画面刷新。
+        视频播放器完成一帧画面的显示后，进入等待状态，等待下一帧的播放时间到来。*/
     is->force_refresh = 0;
     if (show_status) {
         AVBPrint buf;
@@ -2960,6 +3036,8 @@ static void seek_chapter(VideoState *is, int incr)
                                  AV_TIME_BASE_Q), 0, 0);
 }
 
+/*event_loop（）函数是事件处理循环的核心，它负责捕获用户输入（键盘、鼠标、窗
+口事件等），并根据事件类型执行相应操作。这是视频播放器实现用户交互功能的关键模块。*/
 static void event_loop(VideoState *cur_stream)
 {
     SDL_Event event;
@@ -2967,9 +3045,12 @@ static void event_loop(VideoState *cur_stream)
 
     for (;;) {
         double x;
+        /*等待并捕获事件 ：调用 refresh_loop_wait_event 等待用户输入，捕获事件。
+        在播放器中，当我们按键盘、鼠标点击或调整窗口大小时，事件循环会捕获这些输入。*/
         refresh_loop_wait_event(cur_stream, &event);
         switch (event.type) {
         case SDL_KEYDOWN:
+            /*根据键盘输入执行不同操作，如播放速度调整、全屏切换、音量控制等。*/
             if (exit_on_keydown || event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_q) {
                 do_exit(cur_stream);
                 break;
@@ -3082,6 +3163,8 @@ static void event_loop(VideoState *cur_stream)
                 do_exit(cur_stream);
                 break;
             }
+            /*双击鼠标左键切换全屏：双击鼠标左键时，切换全屏模式，并标记窗口需要刷新。
+                在 B 站看视频时，双击屏幕即可切换全屏模式。*/
             if (event.button.button == SDL_BUTTON_LEFT) {
                 static int64_t last_mouse_left_click = 0;
                 if (av_gettime_relative() - last_mouse_left_click <= 500000) {
@@ -3093,6 +3176,8 @@ static void event_loop(VideoState *cur_stream)
                 }
             }
         case SDL_MOUSEMOTION:
+            /*拖动播放进度：当用户按下鼠标并拖动时，计算拖动位置对应的播放时间点并跳转。
+                在视频进度条上拖动鼠标，可以快速定位到视频的某个时间点。*/
             if (cursor_hidden) {
                 SDL_ShowCursor(1);
                 cursor_hidden = 0;
@@ -3103,10 +3188,14 @@ static void event_loop(VideoState *cur_stream)
                     break;
                 x = event.button.x;
             } else {
+                /*  窗口事件处理 ：当窗口大小变化时，重新调整视频显示区域的大小，并刷新视频内容。
+                    拖动播放器窗口的边缘，窗口大小会动态调整，视频画面会自动适配新尺寸。*/
                 if (!(event.motion.state & SDL_BUTTON_RMASK))
                     break;
                 x = event.motion.x;
             }
+                /*跳转时间点 ：用户按下方向键或 PageUp/PageDown 时，播放器跳转到指定时间点。
+                    按 ← 键回退 10 秒，按 → 键前进 10 秒，定位视频播放位置。*/
                 if (seek_by_bytes || cur_stream->ic->duration <= 0) {
                     uint64_t size =  avio_size(cur_stream->ic->pb);
                     stream_seek(cur_stream, size*x/cur_stream->width, 0, 1);
@@ -3147,6 +3236,8 @@ static void event_loop(VideoState *cur_stream)
                     cur_stream->force_refresh = 1;
             }
             break;
+            /*退出事件 (SDL_QUIT/FF_QUIT_EVENT)：捕获退出事件，安全清理资源并关闭播放器。
+                点击窗口关闭按钮，或者按键盘 q/ESC 键，播放器会正常退出。*/
         case SDL_QUIT:
         case FF_QUIT_EVENT:
             do_exit(cur_stream);
@@ -3471,14 +3562,14 @@ int ffplay_main(int argc, char **argv)
             }
         }
     }
-
+    // 打开视频流
     is = stream_open(input_filename, file_iformat);
     if(!is)
     {
         av_log(nullptr, AV_LOG_ERROR, "Failed to initialize AVState\n");
         do_exit(nullptr);
     }
-
+    // FFplay 开始监听用户的输入事件（如暂停、快进、音量调整等）并刷新视频画面。
     event_loop(is);
 
     return 0;

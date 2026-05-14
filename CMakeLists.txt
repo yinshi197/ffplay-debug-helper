@@ -6,17 +6,17 @@ set(CMAKE_CXX_STANDARD 17)
 
 set(HOME ${CMAKE_SOURCE_DIR})
 set(EXECUTABLE_OUTPUT_PATH ${HOME}/bin)
-set(FFMPEG_PATH D://FFmpeg//ffmpeg-7.0-fdk_aac)
-set(SDL_PATH D://FFmpeg//SDL-release-2.30.6//build64)
+set(FFMPEG_PATH /opt/ffmpeg-7)
+set(SDL_PATH /usr)
 
 #包含头文件
 include_directories(${HOME}/include)
 include_directories(${FFMPEG_PATH}/include)
-include_directories(${SDL_PATH}/include)
+include_directories(${SDL_PATH}/include/SDL2)
 
 # 指定要链接的动态库的路径
-link_directories(${FFMPEG_PATH}/bin)
-link_directories(${SDL_PATH}/bin)
+link_directories(${FFMPEG_PATH}/lib)
+link_directories(${SDL_PATH}/lib/x86_64-linux-gnu)
 
 # GLOB_RECURSE：递归搜索指定目录
 file(GLOB MAIN_SRC ${HOME}/src/*.cpp ${HOME}/src/*.c)
@@ -32,5 +32,4 @@ message("C++ compiler: ${CMAKE_CXX_COMPILER}")
 add_executable(ffplay ${MAIN_SRC})
 
 # 指定要链接的动态库
-target_link_libraries(ffplay SDL2 avcodec-61 avdevice-61 avfilter-10 avformat-61 avutil-59 postproc-58 swresample-5 swscale-8)
-
+target_link_libraries(ffplay SDL2 avcodec avdevice avfilter avformat avutil postproc swresample swscale)
