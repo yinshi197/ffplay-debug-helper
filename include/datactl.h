@@ -333,7 +333,7 @@ typedef struct VideoState {
         int frame_drops_late;    // 延迟丢帧计数 | 晚期帧丢弃计数。记录因晚期原因丢弃的帧数量，用于性能监控和优化。
 
         SDL_Texture *vid_texture;// 视频纹理。存储渲染所需的图像数据，用于显示视频帧。
-        double frame_timer;      // 帧计时器
+        double frame_timer;      // 记录“上一帧理论上应该显示的时间点”，用来推算下一帧什么时候显示。 它不是视频 PTS，也不是系统当前时间，而是播放器内部用来控制画面节奏的一个计时基准。
         double frame_last_returned_time; // 最后显示时间
         double frame_last_filter_delay; // 滤镜延迟
         int width, height;       // 帧尺寸
